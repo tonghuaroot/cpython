@@ -5,7 +5,7 @@ import weakref
 
 from ast import Or
 from functools import partial
-from threading import Barrier, Thread
+from threading import Barrier, Event, Thread
 from unittest import TestCase
 
 try:
@@ -335,6 +335,51 @@ class TestDict(TestCase):
 
         with threading_helper.start_threads([t1, t2]):
             pass
+
+    def test_racing_frozendict_fromkeys_during_construction(self):
+        # gh-151722: frozendict.fromkeys(iterable, value) fills the result
+        # in the generic PyIter_Next loop of _PyDict_FromKeys.  The result
+        # must stay untracked until it is fully built; otherwise a thread
+        # reaching it via gc.get_objects() races the fill.  Run under TSan.
+        NUM_KEYS = 4000
+        NUM_ROUNDS = 40
+
+        done = Event()
+
+        class SlowKeys:
+            # A pure-Python iterator yields between keys, widening the
+            # window in which the result is half-built.
+            def __init__(self):
+                self.i = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                if self.i >= NUM_KEYS:
+                    raise StopIteration
+                key = self.i
+                self.i += 1
+                return key
+
+        def scanner():
+            while not done.is_set():
+                for obj in gc.get_objects():
+                    if type(obj) is frozendict:
+                        len(obj)
+                        next(iter(obj), None)
+                time.sleep(0)
+
+        scanners = [Thread(target=scanner) for _ in range(2)]
+        for t in scanners:
+            t.start()
+        try:
+            for _ in range(NUM_ROUNDS):
+                frozendict.fromkeys(SlowKeys(), 1)
+        finally:
+            done.set()
+            for t in scanners:
+                t.join()
 
 if __name__ == "__main__":
     unittest.main()

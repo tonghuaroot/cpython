@@ -3519,6 +3519,16 @@ dict_iter_exit:;
         Py_END_CRITICAL_SECTION();
     }
     else if (PyFrozenDict_Check(d)) {
+        /* The frozendict was tracked when the empty instance was created
+           above, but it is still being populated here from a user-defined
+           iterator.  Keep it untracked while the fill loop runs so a
+           half-built object is never reachable from another thread, then
+           track it once fully built (the same idiom as
+           frozendict_vectorcall). */
+        int was_tracked = _PyObject_GC_IS_TRACKED(d);
+        if (was_tracked) {
+            _PyObject_GC_UNTRACK(d);
+        }
         while ((key = PyIter_Next(it)) != NULL) {
             // setitem_take2_lock_held consumes a reference to key
             status = setitem_take2_lock_held((PyDictObject *)d,
@@ -3527,6 +3537,9 @@ dict_iter_exit:;
                 assert(PyErr_Occurred());
                 goto Fail;
             }
+        }
+        if (was_tracked && !_PyObject_GC_IS_TRACKED(d)) {
+            _PyObject_GC_TRACK(d);
         }
     }
     else {
