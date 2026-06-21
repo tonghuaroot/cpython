@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<!DOCTYPE doc [
+  <!ELEMENT doc ((p | ul | ol)*, (note?, (warn | tip)+)?)>
+  <!ELEMENT p (#PCDATA | em | strong)*>
+  <!ELEMENT ul (li+)>
+  <!ELEMENT ol (li+)>
+  <!ELEMENT li (#PCDATA)>
+  <!ELEMENT em (#PCDATA)>
+  <!ELEMENT strong (#PCDATA)>
+  <!ELEMENT note (#PCDATA)>
+  <!ELEMENT warn (#PCDATA)>
+  <!ELEMENT tip (#PCDATA)>
+]>
+<doc><p>hi <em>there</em></p><ul><li>x</li></ul></doc>

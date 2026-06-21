@@ -578,6 +578,82 @@ static int fuzz_pycompile(const char* data, size_t size) {
     return 0;
 }
 
+#define MAX_PYEXPAT_TEST_SIZE 0x100000
+PyObject* pyexpat_module = NULL;
+PyObject* pyexpat_error = NULL;
+PyObject* pyexpat_noop = NULL;
+/* DTD/content-model + callback-glue handlers to register. Setting these
+   activates the C paths -- ElementDeclHandler drives conv_content_model. */
+static const char* pyexpat_handler_names[] = {
+    "ElementDeclHandler", "AttlistDeclHandler", "EntityDeclHandler",
+    "StartElementHandler", "EndElementHandler", "CharacterDataHandler",
+    "DefaultHandler", "StartDoctypeDeclHandler"};
+#define PYEXPAT_NUM_HANDLERS \
+    (sizeof(pyexpat_handler_names) / sizeof(pyexpat_handler_names[0]))
+/* Called by LLVMFuzzerTestOneInput for initialization */
+static int init_pyexpat(void) {
+    pyexpat_module = PyImport_ImportModule("xml.parsers.expat");
+    if (pyexpat_module == NULL) {
+        return 0;
+    }
+    pyexpat_error = PyObject_GetAttrString(pyexpat_module, "ExpatError");
+    if (pyexpat_error == NULL) {
+        return 0;
+    }
+    /* A variadic no-op callback; registering it is what activates the C
+       glue. It must accept the handler-specific argument counts. */
+    PyObject* globals = PyDict_New();
+    if (globals == NULL) {
+        return 0;
+    }
+    pyexpat_noop = PyRun_String("lambda *a: None", Py_eval_input,
+                                globals, globals);
+    Py_DECREF(globals);
+    return pyexpat_noop != NULL;
+}
+/* Fuzz xml.parsers.expat with DTD/content-model handlers registered. */
+static int fuzz_pyexpat(const char* data, size_t size) {
+    if (size > MAX_PYEXPAT_TEST_SIZE) {
+        return 0;
+    }
+
+    PyObject* parser =
+        PyObject_CallMethod(pyexpat_module, "ParserCreate", NULL);
+    if (parser == NULL) {
+        PyErr_Clear();
+        return 0;
+    }
+    /* Register the handlers that exercise conv_content_model and the
+       nested-structure builders on attacker-controlled XML/DTD. */
+    for (size_t i = 0; i < PYEXPAT_NUM_HANDLERS; i++) {
+        if (PyObject_SetAttrString(
+                parser, pyexpat_handler_names[i], pyexpat_noop) < 0) {
+            Py_DECREF(parser);
+            PyErr_Clear();
+            return 0;
+        }
+    }
+
+    PyObject* result = PyObject_CallMethod(parser, "Parse", "y#i",
+                                           data, (Py_ssize_t)size, 1);
+    if (result == NULL) {
+        /* Malformed XML/DTD raises ExpatError in abundance; deep nesting
+           may raise ValueError/RecursionError; an unknown encoding name
+           in the XML declaration raises LookupError. Anything else is a
+           finding. A genuine stack overflow crashes outright -- the point. */
+        if (PyErr_ExceptionMatches(pyexpat_error) ||
+            PyErr_ExceptionMatches(PyExc_ValueError) ||
+            PyErr_ExceptionMatches(PyExc_LookupError) ||
+            PyErr_ExceptionMatches(PyExc_RecursionError)) {
+            PyErr_Clear();
+        }
+    }
+
+    Py_XDECREF(result);
+    Py_DECREF(parser);
+    return 0;
+}
+
 /* Run fuzzer and abort on failure. */
 static int _run_fuzz(const uint8_t *data, size_t size, int(*fuzzer)(const char* , size_t)) {
     int rv = fuzzer((const char*) data, size);
@@ -722,6 +798,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 #endif
 #if !defined(_Py_FUZZ_ONE) || defined(_Py_FUZZ_fuzz_pycompile)
     rv |= _run_fuzz(data, size, fuzz_pycompile);
+#endif
+#if !defined(_Py_FUZZ_ONE) || defined(_Py_FUZZ_fuzz_pyexpat)
+    static int PYEXPAT_INITIALIZED = 0;
+    if (!PYEXPAT_INITIALIZED && !init_pyexpat()) {
+        PyErr_Print();
+        abort();
+    } else {
+        PYEXPAT_INITIALIZED = 1;
+    }
+
+    rv |= _run_fuzz(data, size, fuzz_pyexpat);
 #endif
   return rv;
 }

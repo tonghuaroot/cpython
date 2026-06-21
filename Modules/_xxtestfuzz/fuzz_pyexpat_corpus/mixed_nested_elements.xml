@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html [
+  <!ELEMENT html (head, body)>
+  <!ELEMENT head (title)>
+  <!ELEMENT title (#PCDATA)>
+  <!ELEMENT body (section+)>
+  <!ELEMENT section (h, (para | list)*)>
+  <!ELEMENT h (#PCDATA)>
+  <!ELEMENT para (#PCDATA)>
+  <!ELEMENT list (item+)>
+  <!ELEMENT item (#PCDATA)>
+  <!ATTLIST section class CDATA #IMPLIED>
+]>
+<html>
+  <head><title>t</title></head>
+  <body>
+    <section class="intro"><h>Hello</h><para>world</para></section>
+  </body>
+</html>
