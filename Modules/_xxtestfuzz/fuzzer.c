@@ -578,6 +578,79 @@ static int fuzz_pycompile(const char* data, size_t size) {
     return 0;
 }
 
+#define MAX_ZONEINFO_TEST_SIZE 0x100000
+PyObject* zoneinfo_from_file_method = NULL;
+PyObject* zoneinfo_bytesio_type = NULL;
+PyObject* zoneinfo_struct_error = NULL;
+/* Called by LLVMFuzzerTestOneInput for initialization */
+static int init_zoneinfo(void) {
+    PyObject* zoneinfo_module = PyImport_ImportModule("zoneinfo");
+    if (zoneinfo_module == NULL) {
+        return 0;
+    }
+    PyObject* zoneinfo_type =
+        PyObject_GetAttrString(zoneinfo_module, "ZoneInfo");
+    Py_DECREF(zoneinfo_module);
+    if (zoneinfo_type == NULL) {
+        return 0;
+    }
+    zoneinfo_from_file_method =
+        PyObject_GetAttrString(zoneinfo_type, "from_file");
+    Py_DECREF(zoneinfo_type);
+    if (zoneinfo_from_file_method == NULL) {
+        return 0;
+    }
+
+    PyObject* struct_module = PyImport_ImportModule("struct");
+    if (struct_module == NULL) {
+        return 0;
+    }
+    zoneinfo_struct_error = PyObject_GetAttrString(struct_module, "error");
+    Py_DECREF(struct_module);
+    if (zoneinfo_struct_error == NULL) {
+        return 0;
+    }
+
+    PyObject* io_module = PyImport_ImportModule("io");
+    if (io_module == NULL) {
+        return 0;
+    }
+    zoneinfo_bytesio_type = PyObject_GetAttrString(io_module, "BytesIO");
+    Py_DECREF(io_module);
+    return zoneinfo_bytesio_type != NULL;
+}
+/* Fuzz zoneinfo.ZoneInfo.from_file(io.BytesIO(x)) */
+static int fuzz_zoneinfo(const char* data, size_t size) {
+    if (size > MAX_ZONEINFO_TEST_SIZE) {
+        return 0;
+    }
+
+    PyObject* input = PyObject_CallFunction(
+        zoneinfo_bytesio_type, "y#", data, (Py_ssize_t)size);
+    if (input == NULL) {
+        return 0;
+    }
+
+    PyObject* result =
+        PyObject_CallOneArg(zoneinfo_from_file_method, input);
+    if (result == NULL) {
+        /* Ignore the exceptions raised for malformed TZif data and TZ
+           strings, which the fuzzer will produce in abundance. */
+        if (PyErr_ExceptionMatches(PyExc_ValueError) ||
+            PyErr_ExceptionMatches(PyExc_OSError) ||
+            PyErr_ExceptionMatches(PyExc_EOFError) ||
+            PyErr_ExceptionMatches(PyExc_AssertionError) ||
+            PyErr_ExceptionMatches(PyExc_UnicodeDecodeError) ||
+            PyErr_ExceptionMatches(zoneinfo_struct_error)) {
+            PyErr_Clear();
+        }
+    }
+
+    Py_XDECREF(result);
+    Py_DECREF(input);
+    return 0;
+}
+
 /* Run fuzzer and abort on failure. */
 static int _run_fuzz(const uint8_t *data, size_t size, int(*fuzzer)(const char* , size_t)) {
     int rv = fuzzer((const char*) data, size);
@@ -722,6 +795,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 #endif
 #if !defined(_Py_FUZZ_ONE) || defined(_Py_FUZZ_fuzz_pycompile)
     rv |= _run_fuzz(data, size, fuzz_pycompile);
+#endif
+#if !defined(_Py_FUZZ_ONE) || defined(_Py_FUZZ_fuzz_zoneinfo)
+    static int ZONEINFO_INITIALIZED = 0;
+    if (!ZONEINFO_INITIALIZED && !init_zoneinfo()) {
+        PyErr_Print();
+        abort();
+    } else {
+        ZONEINFO_INITIALIZED = 1;
+    }
+
+    rv |= _run_fuzz(data, size, fuzz_zoneinfo);
 #endif
   return rv;
 }
