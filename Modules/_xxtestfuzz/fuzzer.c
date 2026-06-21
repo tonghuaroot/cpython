@@ -500,6 +500,245 @@ static int fuzz_elementtree_parsewhole(const char* data, size_t size) {
     return 0;
 }
 
+#define MAX_DECOMPRESS_TEST_SIZE 0x10000
+
+/* Cap liblzma's decoder memory so a crafted stream declaring a multi-gigabyte
+   dictionary raises LZMAError (a documented, by-design limit) instead of having
+   liblzma allocate gigabytes at decoder init and trip the fuzzer OOM check. */
+#define DECOMPRESS_LZMA_MEMLIMIT (100 * 1024 * 1024)
+
+/* Modules exposing the three C decompressors under test, plus the small set of
+   exceptions they are documented to raise on malformed/truncated/reused input.
+   Anything else propagating out is a genuine bug and must abort. */
+PyObject* zlib_module = NULL;
+PyObject* bz2_module = NULL;
+PyObject* lzma_module = NULL;
+PyObject* zlib_error = NULL;
+PyObject* lzma_error = NULL;
+/* Called by LLVMFuzzerTestOneInput for initialization */
+static int init_decompress(void) {
+    zlib_module = PyImport_ImportModule("zlib");
+    if (zlib_module == NULL) {
+        return 0;
+    }
+    zlib_error = PyObject_GetAttrString(zlib_module, "error");
+    if (zlib_error == NULL) {
+        return 0;
+    }
+    bz2_module = PyImport_ImportModule("bz2");
+    if (bz2_module == NULL) {
+        return 0;
+    }
+    lzma_module = PyImport_ImportModule("lzma");
+    if (lzma_module == NULL) {
+        return 0;
+    }
+    lzma_error = PyObject_GetAttrString(lzma_module, "LZMAError");
+    return lzma_error != NULL;
+}
+
+/* Clear the small set of exceptions that decompressing untrusted bytes is
+   expected to raise. Returns 1 if the (already set) exception was expected and
+   was cleared, 0 if it was unexpected and should propagate / abort.
+   ValueError covers reuse-after-error and bad arguments; OSError covers bz2's
+   "Invalid data stream"; EOFError covers reuse-after-eof; MemoryError covers a
+   declared output size that exceeds memlimit. zlib.error and lzma.LZMAError
+   subclass Exception (not OSError), so they are matched explicitly. */
+static int clear_expected_decompress_error(void) {
+    if (PyErr_ExceptionMatches(PyExc_ValueError) ||
+        PyErr_ExceptionMatches(PyExc_OSError) ||
+        PyErr_ExceptionMatches(PyExc_EOFError) ||
+        PyErr_ExceptionMatches(PyExc_MemoryError) ||
+        PyErr_ExceptionMatches(PyExc_OverflowError) ||
+        PyErr_ExceptionMatches(zlib_error) ||
+        PyErr_ExceptionMatches(lzma_error)) {
+        PyErr_Clear();
+        return 1;
+    }
+    return 0;
+}
+
+/* Drive one incremental decompressor object through a fuzzer-chosen sequence of
+   decompress(chunk, max_length) calls, then KEEP CALLING it after it reports
+   eof and after it raises — exactly the reuse-after-eof / reuse-after-error
+   surface that CVE-2026-6100 (UAF) and CVE-2026-9669 (reuse OOB) lived in.
+   `decompressor` is a fresh decompressor object; this function borrows `data`
+   and never holds a reference past return. */
+static void drive_incremental(PyObject* decompressor, const char* data,
+                              size_t size) {
+    size_t pos = 0;
+    /* Bounded number of feed iterations; each consumes at least one byte of the
+       chunk-split schedule so the loop always terminates. */
+    for (int iter = 0; iter < 64; iter++) {
+        /* First byte of remaining input picks a chunk length, second picks a
+           max_length class; if we run out we feed empty chunks (which exercises
+           the needs_input / already-at-eof transitions). */
+        Py_ssize_t chunk_len = 0;
+        if (pos < size) {
+            chunk_len = 1 + ((unsigned char) data[pos]) % 64;
+            pos++;
+        }
+        if ((size_t) chunk_len > size - pos) {
+            chunk_len = (Py_ssize_t)(size - pos);
+        }
+        const char* chunk = data + pos;
+        pos += (size_t) chunk_len;
+
+        Py_ssize_t max_length = -1;
+        if (pos < size) {
+            unsigned char m = (unsigned char) data[pos];
+            pos++;
+            /* Mix of unbounded (-1) and small bounded reads to exercise the
+               needs_input/leftover-input bookkeeping that both CVEs touched. */
+            switch (m % 4) {
+                case 0: max_length = -1; break;
+                case 1: max_length = 0; break;
+                case 2: max_length = 1 + (m >> 2); break;
+                default: max_length = (Py_ssize_t)(m % 17); break;
+            }
+        }
+
+        PyObject* out = PyObject_CallMethod(decompressor, "decompress", "y#n",
+                                            chunk, chunk_len, max_length);
+        if (out == NULL) {
+            if (!clear_expected_decompress_error()) {
+                return; /* unexpected exception: let _run_fuzz abort */
+            }
+            /* Reuse-after-error: deliberately call once more. The library-level
+               guard (bz2 poison flag / liblzma ISEQ_ERROR / zlib BAD-mode) must
+               turn this into a clean exception, not memory corruption. */
+            PyObject* again = PyObject_CallMethod(decompressor, "decompress",
+                                                  "y#n", "", (Py_ssize_t)0,
+                                                  (Py_ssize_t)-1);
+            if (again == NULL) {
+                if (!clear_expected_decompress_error()) {
+                    return;
+                }
+            } else {
+                Py_DECREF(again);
+            }
+            return;
+        }
+        Py_DECREF(out);
+
+        /* Stop feeding once the stream reports eof, then probe reuse-after-eof
+           (one extra decompress call) which must raise EOFError, not crash. */
+        PyObject* eof = PyObject_GetAttrString(decompressor, "eof");
+        int is_eof = (eof != NULL && PyObject_IsTrue(eof) == 1);
+        Py_XDECREF(eof);
+        if (is_eof) {
+            PyObject* after = PyObject_CallMethod(decompressor, "decompress",
+                                                  "y#n", "", (Py_ssize_t)0,
+                                                  (Py_ssize_t)-1);
+            if (after == NULL) {
+                if (!clear_expected_decompress_error()) {
+                    return;
+                }
+            } else {
+                Py_DECREF(after);
+            }
+            return;
+        }
+        if (pos >= size && chunk_len == 0) {
+            /* No input left and last chunk was empty: nothing more to feed. */
+            return;
+        }
+    }
+}
+
+/* Fuzz the zlib/bz2/lzma C decompressors: one-shot module.decompress() plus the
+   incremental decompressor objects (zlib.decompressobj, bz2.BZ2Decompressor,
+   lzma.LZMADecompressor), including their reuse-after-eof and reuse-after-error
+   paths. These parse fully untrusted bytes and have no dedicated OSS-Fuzz
+   target. */
+static int fuzz_decompress(const char* data, size_t size) {
+    if (size > MAX_DECOMPRESS_TEST_SIZE) {
+        return 0;
+    }
+
+    PyObject* input = PyBytes_FromStringAndSize(data, size);
+    if (input == NULL) {
+        return 0;
+    }
+
+    /* ---- zlib ---- */
+    /* one-shot zlib.decompress(data) */
+    PyObject* r = PyObject_CallMethod(zlib_module, "decompress", "O", input);
+    if (r == NULL) {
+        if (!clear_expected_decompress_error()) { Py_DECREF(input); return 0; }
+    } else {
+        Py_DECREF(r);
+    }
+    /* incremental zlib.decompressobj().decompress(chunk, max_length) + reuse */
+    PyObject* zobj = PyObject_CallMethod(zlib_module, "decompressobj", NULL);
+    if (zobj == NULL) {
+        if (!clear_expected_decompress_error()) { Py_DECREF(input); return 0; }
+    } else {
+        drive_incremental(zobj, data, size);
+        if (!PyErr_Occurred()) {
+            /* flush() then attempt reuse — flush-after-decompress path. */
+            PyObject* f = PyObject_CallMethod(zobj, "flush", NULL);
+            if (f == NULL) {
+                clear_expected_decompress_error();
+            } else {
+                Py_DECREF(f);
+            }
+        }
+        Py_DECREF(zobj);
+        if (PyErr_Occurred() && !clear_expected_decompress_error()) {
+            Py_DECREF(input); return 0;
+        }
+    }
+
+    /* ---- bz2 ---- */
+    r = PyObject_CallMethod(bz2_module, "decompress", "O", input);
+    if (r == NULL) {
+        if (!clear_expected_decompress_error()) { Py_DECREF(input); return 0; }
+    } else {
+        Py_DECREF(r);
+    }
+    PyObject* bobj = PyObject_CallMethod(bz2_module, "BZ2Decompressor", NULL);
+    if (bobj == NULL) {
+        if (!clear_expected_decompress_error()) { Py_DECREF(input); return 0; }
+    } else {
+        drive_incremental(bobj, data, size);
+        Py_DECREF(bobj);
+        if (PyErr_Occurred() && !clear_expected_decompress_error()) {
+            Py_DECREF(input); return 0;
+        }
+    }
+
+    /* ---- lzma ---- */
+    /* FORMAT_AUTO (the default) is the most parser-heavy path: it sniffs xz vs.
+       legacy .lzma framing. A crafted stream can declare a multi-gigabyte
+       dictionary that liblzma allocates at decoder init, so bound it with
+       memlimit (a documented LZMAError, not a bug) to keep the fuzzer from
+       rediscovering the well-known liblzma memory-bomb on every run. */
+    r = PyObject_CallMethod(lzma_module, "decompress", "Oin", input,
+                            0 /* FORMAT_AUTO */,
+                            (Py_ssize_t)DECOMPRESS_LZMA_MEMLIMIT);
+    if (r == NULL) {
+        if (!clear_expected_decompress_error()) { Py_DECREF(input); return 0; }
+    } else {
+        Py_DECREF(r);
+    }
+    PyObject* lobj = PyObject_CallMethod(lzma_module, "LZMADecompressor", "in",
+                                         0 /* FORMAT_AUTO */,
+                                         (Py_ssize_t)DECOMPRESS_LZMA_MEMLIMIT);
+    if (lobj == NULL) {
+        if (!clear_expected_decompress_error()) { Py_DECREF(input); return 0; }
+    } else {
+        drive_incremental(lobj, data, size);
+        Py_DECREF(lobj);
+        if (PyErr_Occurred() && !clear_expected_decompress_error()) {
+            Py_DECREF(input); return 0;
+        }
+    }
+
+    Py_DECREF(input);
+    return 0;
+}
+
 #define MAX_PYCOMPILE_TEST_SIZE 16384
 
 static const int start_vals[] = {Py_eval_input, Py_single_input, Py_file_input};
@@ -722,6 +961,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 #endif
 #if !defined(_Py_FUZZ_ONE) || defined(_Py_FUZZ_fuzz_pycompile)
     rv |= _run_fuzz(data, size, fuzz_pycompile);
+#endif
+#if !defined(_Py_FUZZ_ONE) || defined(_Py_FUZZ_fuzz_decompress)
+    static int DECOMPRESS_INITIALIZED = 0;
+    if (!DECOMPRESS_INITIALIZED && !init_decompress()) {
+        PyErr_Print();
+        abort();
+    } else {
+        DECOMPRESS_INITIALIZED = 1;
+    }
+
+    rv |= _run_fuzz(data, size, fuzz_decompress);
 #endif
   return rv;
 }

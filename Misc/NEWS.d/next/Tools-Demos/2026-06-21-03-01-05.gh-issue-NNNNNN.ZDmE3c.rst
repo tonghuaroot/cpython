@@ -1,0 +1,4 @@
+Added a ``fuzz_decompress`` target to the ``_xxtestfuzz`` fuzzing harness that
+exercises the :mod:`zlib`, :mod:`bz2` and :mod:`lzma` decompressors, including
+the incremental decompressor objects and their reuse-after-error and
+reuse-after-end-of-stream paths.
