@@ -1,0 +1,3 @@
+:func:`marshal.loads` now raises :exc:`ValueError` instead of
+:exc:`SystemError` when given data that decodes to a code object with
+internally inconsistent fields.

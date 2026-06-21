@@ -189,6 +189,161 @@ static int fuzz_json_loads(const char* data, size_t size) {
     return 0;
 }
 
+/* marshal.loads parses the untrusted binary .pyc serialization format in C via
+   the hand-written recursive descent reader r_object().  It is reachable on
+   untrusted input (cached/shipped .pyc data, marshal blobs over the wire), yet
+   has no dedicated parser-safety harness.  This exercises that reader: the
+   reference table (FLAG_REF / r_ref / TYPE_REF), the variable-length int,
+   string and container readers, code objects, interned strings and the
+   recursion-depth guard. */
+PyObject* marshal_loads_method = NULL;
+/* Called by LLVMFuzzerTestOneInput for initialization */
+static int init_marshal_loads(void) {
+    PyObject* marshal_module = PyImport_ImportModule("marshal");
+    if (marshal_module == NULL) {
+        return 0;
+    }
+    marshal_loads_method = PyObject_GetAttrString(marshal_module, "loads");
+    Py_DECREF(marshal_module);
+    return marshal_loads_method != NULL;
+}
+/* Fuzz marshal.loads(x) */
+static int fuzz_marshal_loads(const char* data, size_t size) {
+    PyObject* input_bytes = PyBytes_FromStringAndSize(data, size);
+    if (input_bytes == NULL) {
+        return 0;
+    }
+    PyObject* parsed = PyObject_CallOneArg(marshal_loads_method, input_bytes);
+    if (parsed == NULL) {
+        /* marshal raises these for the truncated / malformed / overly deep
+           inputs the fuzzer naturally generates; none of them is a bug. */
+        if (PyErr_ExceptionMatches(PyExc_ValueError) ||
+            PyErr_ExceptionMatches(PyExc_EOFError) ||
+            PyErr_ExceptionMatches(PyExc_TypeError) ||
+            PyErr_ExceptionMatches(PyExc_RecursionError) ||
+            PyErr_ExceptionMatches(PyExc_MemoryError) ||
+            PyErr_ExceptionMatches(PyExc_OverflowError) ||
+            PyErr_ExceptionMatches(PyExc_StopIteration) ||
+            PyErr_ExceptionMatches(PyExc_UnicodeDecodeError)
+        ) {
+            PyErr_Clear();
+        }
+    }
+    Py_DECREF(input_bytes);
+    Py_XDECREF(parsed);
+    return 0;
+}
+
+/* pickle.loads runs an untrusted opcode stream.  Executing arbitrary reduce
+   callables is by design (the documented RCE surface), so to fuzz only the
+   *stream parser* -- opcodes, the memo, framing, and the BINBYTES / BINUNICODE
+   length decoders -- we drive a restricted Unpickler whose find_class is
+   blocked.  That keeps the fuzzer on the C parser's memory-safety surface
+   without standing up arbitrary object construction. */
+PyObject* pickle_unpickler_type = NULL;
+PyObject* pickle_io_bytesio = NULL;
+PyObject* pickle_unpickling_error = NULL;
+/* Called by LLVMFuzzerTestOneInput for initialization.  We subclass Unpickler
+   in Python so find_class always raises, turning every GLOBAL/REDUCE/INST/OBJ
+   into a benign UnpicklingError while the C stream parser still runs fully. */
+static int init_pickle_loads(void) {
+    PyObject* io_module = PyImport_ImportModule("io");
+    if (io_module == NULL) {
+        return 0;
+    }
+    pickle_io_bytesio = PyObject_GetAttrString(io_module, "BytesIO");
+    Py_DECREF(io_module);
+    if (pickle_io_bytesio == NULL) {
+        return 0;
+    }
+
+    PyObject* pickle_module = PyImport_ImportModule("_pickle");
+    if (pickle_module == NULL) {
+        return 0;
+    }
+    pickle_unpickling_error = PyObject_GetAttrString(
+        pickle_module, "UnpicklingError");
+    if (pickle_unpickling_error == NULL) {
+        Py_DECREF(pickle_module);
+        return 0;
+    }
+
+    /* class _RestrictedUnpickler(_pickle.Unpickler):
+           def find_class(self, module, name):
+               raise _pickle.UnpicklingError("blocked") */
+    PyObject* globals = PyDict_New();
+    if (globals == NULL) {
+        Py_DECREF(pickle_module);
+        return 0;
+    }
+    PyObject* builtins = PyEval_GetBuiltins();  /* borrowed */
+    if (builtins != NULL) {
+        PyDict_SetItemString(globals, "__builtins__", builtins);
+    }
+    PyDict_SetItemString(globals, "_pickle", pickle_module);
+    Py_DECREF(pickle_module);
+
+    const char* src =
+        "class _RestrictedUnpickler(_pickle.Unpickler):\n"
+        "    def find_class(self, module, name):\n"
+        "        raise _pickle.UnpicklingError('find_class blocked')\n";
+    PyObject* res = PyRun_String(src, Py_file_input, globals, globals);
+    if (res == NULL) {
+        Py_DECREF(globals);
+        return 0;
+    }
+    Py_DECREF(res);
+    pickle_unpickler_type = PyDict_GetItemString(
+        globals, "_RestrictedUnpickler");  /* borrowed */
+    Py_XINCREF(pickle_unpickler_type);
+    Py_DECREF(globals);
+    return pickle_unpickler_type != NULL;
+}
+/* Fuzz the pickle stream parser via a find_class-blocked Unpickler. */
+static int fuzz_pickle_loads(const char* data, size_t size) {
+    PyObject* input_bytes = PyBytes_FromStringAndSize(data, size);
+    if (input_bytes == NULL) {
+        return 0;
+    }
+    PyObject* stream = PyObject_CallOneArg(pickle_io_bytesio, input_bytes);
+    Py_DECREF(input_bytes);
+    if (stream == NULL) {
+        return 0;
+    }
+    PyObject* unpickler = PyObject_CallOneArg(pickle_unpickler_type, stream);
+    Py_DECREF(stream);
+    if (unpickler == NULL) {
+        /* Construction can fail e.g. on bad keyword paths; treat as benign. */
+        if (PyErr_Occurred()) {
+            PyErr_Clear();
+        }
+        return 0;
+    }
+    PyObject* loaded = PyObject_CallMethod(unpickler, "load", NULL);
+    if (loaded == NULL) {
+        /* The fuzzer mostly produces malformed streams, and find_class is
+           wired to refuse, so these exceptions are all expected. */
+        if (PyErr_ExceptionMatches(pickle_unpickling_error) ||
+            PyErr_ExceptionMatches(PyExc_ValueError) ||
+            PyErr_ExceptionMatches(PyExc_EOFError) ||
+            PyErr_ExceptionMatches(PyExc_TypeError) ||
+            PyErr_ExceptionMatches(PyExc_KeyError) ||
+            PyErr_ExceptionMatches(PyExc_IndexError) ||
+            PyErr_ExceptionMatches(PyExc_AttributeError) ||
+            PyErr_ExceptionMatches(PyExc_RecursionError) ||
+            PyErr_ExceptionMatches(PyExc_MemoryError) ||
+            PyErr_ExceptionMatches(PyExc_OverflowError) ||
+            PyErr_ExceptionMatches(PyExc_ImportError) ||
+            PyErr_ExceptionMatches(PyExc_UnicodeDecodeError)
+        ) {
+            PyErr_Clear();
+        }
+    }
+    Py_DECREF(unpickler);
+    Py_XDECREF(loaded);
+    return 0;
+}
+
 #define MAX_RE_TEST_SIZE 0x10000
 
 PyObject* re_compile_method = NULL;
@@ -662,6 +817,28 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     }
 
     rv |= _run_fuzz(data, size, fuzz_json_loads);
+#endif
+#if !defined(_Py_FUZZ_ONE) || defined(_Py_FUZZ_fuzz_marshal_loads)
+    static int MARSHAL_LOADS_INITIALIZED = 0;
+    if (!MARSHAL_LOADS_INITIALIZED && !init_marshal_loads()) {
+        PyErr_Print();
+        abort();
+    } else {
+        MARSHAL_LOADS_INITIALIZED = 1;
+    }
+
+    rv |= _run_fuzz(data, size, fuzz_marshal_loads);
+#endif
+#if !defined(_Py_FUZZ_ONE) || defined(_Py_FUZZ_fuzz_pickle_loads)
+    static int PICKLE_LOADS_INITIALIZED = 0;
+    if (!PICKLE_LOADS_INITIALIZED && !init_pickle_loads()) {
+        PyErr_Print();
+        abort();
+    } else {
+        PICKLE_LOADS_INITIALIZED = 1;
+    }
+
+    rv |= _run_fuzz(data, size, fuzz_pickle_loads);
 #endif
 #if !defined(_Py_FUZZ_ONE) || defined(_Py_FUZZ_fuzz_sre_compile)
     static int SRE_COMPILE_INITIALIZED = 0;

@@ -1670,6 +1670,16 @@ r_object(RFILE *p)
             };
 
             if (_PyCode_Validate(&con) < 0) {
+                /* _PyCode_Validate() raises SystemError (via
+                   PyErr_BadInternalCall()) for internally inconsistent code
+                   objects, e.g. a localsplusnames tuple whose length differs
+                   from the localspluskinds bytes.  Such inconsistencies are
+                   expected on untrusted/corrupted marshal data, so report them
+                   as bad marshal data rather than leaking a SystemError. */
+                if (PyErr_ExceptionMatches(PyExc_SystemError)) {
+                    PyErr_SetString(PyExc_ValueError,
+                        "bad marshal data (invalid code object)");
+                }
                 goto code_error;
             }
 

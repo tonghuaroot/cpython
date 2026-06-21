@@ -1,0 +1,5 @@
+Add libFuzzer harnesses for :func:`marshal.loads` and :func:`pickle.loads`,
+covering the hand-written recursive binary readers in :mod:`marshal` and the
+pickle opcode stream parser in :mod:`!_pickle`.  Both parse untrusted bytes in
+C and previously had no OSS-Fuzz target.  The pickle harness uses a restricted
+unpickler that blocks ``find_class`` so it exercises only the stream parser.
