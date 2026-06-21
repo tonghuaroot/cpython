@@ -1,0 +1,2 @@
+Add a fuzz target for :meth:`datetime.datetime.fromisoformat` and the
+:meth:`date.fromisoformat` and :meth:`time.fromisoformat` variants.

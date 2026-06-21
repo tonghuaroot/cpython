@@ -649,6 +649,9 @@ Modules/_xxtestfuzz/fuzzer.c	-	xmlparser_type	-
 Modules/_xxtestfuzz/fuzzer.c	-	pycompile_scratch	-
 Modules/_xxtestfuzz/fuzzer.c	-	start_vals	-
 Modules/_xxtestfuzz/fuzzer.c	-	optimize_vals	-
+Modules/_xxtestfuzz/fuzzer.c	-	datetime_fromisoformat_method	-
+Modules/_xxtestfuzz/fuzzer.c	-	date_fromisoformat_method	-
+Modules/_xxtestfuzz/fuzzer.c	-	time_fromisoformat_method	-
 Modules/_xxtestfuzz/fuzzer.c	LLVMFuzzerTestOneInput	CSV_READER_INITIALIZED	-
 Modules/_xxtestfuzz/fuzzer.c	LLVMFuzzerTestOneInput	JSON_LOADS_INITIALIZED	-
 Modules/_xxtestfuzz/fuzzer.c	LLVMFuzzerTestOneInput	SRE_COMPILE_INITIALIZED	-
@@ -656,6 +659,7 @@ Modules/_xxtestfuzz/fuzzer.c	LLVMFuzzerTestOneInput	SRE_MATCH_INITIALIZED	-
 Modules/_xxtestfuzz/fuzzer.c	LLVMFuzzerTestOneInput	STRUCT_UNPACK_INITIALIZED	-
 Modules/_xxtestfuzz/fuzzer.c	LLVMFuzzerTestOneInput	AST_LITERAL_EVAL_INITIALIZED	-
 Modules/_xxtestfuzz/fuzzer.c	LLVMFuzzerTestOneInput	ELEMENTTREE_PARSEWHOLE_INITIALIZED	-
+Modules/_xxtestfuzz/fuzzer.c	LLVMFuzzerTestOneInput	DATETIME_FROMISOFORMAT_INITIALIZED	-
 
 ##-----------------------
 ## the analyzer should have ignored these

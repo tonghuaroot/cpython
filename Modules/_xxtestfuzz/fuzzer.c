@@ -578,6 +578,76 @@ static int fuzz_pycompile(const char* data, size_t size) {
     return 0;
 }
 
+#define MAX_DATETIME_FROMISOFORMAT_TEST_SIZE 0x10000
+
+PyObject* datetime_fromisoformat_method = NULL;
+PyObject* date_fromisoformat_method = NULL;
+PyObject* time_fromisoformat_method = NULL;
+/* Called by LLVMFuzzerTestOneInput for initialization */
+static int init_datetime_fromisoformat(void) {
+    PyObject* datetime_module = PyImport_ImportModule("datetime");
+    if (datetime_module == NULL) {
+        return 0;
+    }
+    PyObject* datetime_type = PyObject_GetAttrString(datetime_module, "datetime");
+    PyObject* date_type = PyObject_GetAttrString(datetime_module, "date");
+    PyObject* time_type = PyObject_GetAttrString(datetime_module, "time");
+    Py_DECREF(datetime_module);
+    if (datetime_type == NULL || date_type == NULL || time_type == NULL) {
+        Py_XDECREF(datetime_type);
+        Py_XDECREF(date_type);
+        Py_XDECREF(time_type);
+        return 0;
+    }
+    datetime_fromisoformat_method = PyObject_GetAttrString(datetime_type, "fromisoformat");
+    date_fromisoformat_method = PyObject_GetAttrString(date_type, "fromisoformat");
+    time_fromisoformat_method = PyObject_GetAttrString(time_type, "fromisoformat");
+    Py_DECREF(datetime_type);
+    Py_DECREF(date_type);
+    Py_DECREF(time_type);
+    return datetime_fromisoformat_method != NULL &&
+           date_fromisoformat_method != NULL &&
+           time_fromisoformat_method != NULL;
+}
+static void call_one_fromisoformat(PyObject* method, PyObject* arg) {
+    PyObject* result = PyObject_CallOneArg(method, arg);
+    if (result == NULL) {
+        if (PyErr_ExceptionMatches(PyExc_ValueError) ||
+            PyErr_ExceptionMatches(PyExc_OverflowError) ||
+            PyErr_ExceptionMatches(PyExc_TypeError)) {
+            PyErr_Clear();
+        }
+    }
+    Py_XDECREF(result);
+}
+static int fuzz_datetime_fromisoformat(const char* data, size_t size) {
+    if (size > MAX_DATETIME_FROMISOFORMAT_TEST_SIZE) {
+        return 0;
+    }
+    /* fromisoformat takes str, not bytes. */
+    PyObject* s = PyUnicode_DecodeLatin1(data, (Py_ssize_t)size, "strict");
+    if (s == NULL) {
+        PyErr_Clear();
+        return 0;
+    }
+    call_one_fromisoformat(datetime_fromisoformat_method, s);
+    call_one_fromisoformat(date_fromisoformat_method, s);
+    call_one_fromisoformat(time_fromisoformat_method, s);
+    Py_DECREF(s);
+
+    /* Also decode with surrogatepass to reach the lone-surrogate path. */
+    PyObject* s_sp = PyUnicode_DecodeUTF8(data, (Py_ssize_t)size, "surrogatepass");
+    if (s_sp == NULL) {
+        PyErr_Clear();
+        return 0;
+    }
+    call_one_fromisoformat(datetime_fromisoformat_method, s_sp);
+    call_one_fromisoformat(date_fromisoformat_method, s_sp);
+    call_one_fromisoformat(time_fromisoformat_method, s_sp);
+    Py_DECREF(s_sp);
+    return 0;
+}
+
 /* Run fuzzer and abort on failure. */
 static int _run_fuzz(const uint8_t *data, size_t size, int(*fuzzer)(const char* , size_t)) {
     int rv = fuzzer((const char*) data, size);
@@ -722,6 +792,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 #endif
 #if !defined(_Py_FUZZ_ONE) || defined(_Py_FUZZ_fuzz_pycompile)
     rv |= _run_fuzz(data, size, fuzz_pycompile);
+#endif
+#if !defined(_Py_FUZZ_ONE) || defined(_Py_FUZZ_fuzz_datetime_fromisoformat)
+    static int DATETIME_FROMISOFORMAT_INITIALIZED = 0;
+    if (!DATETIME_FROMISOFORMAT_INITIALIZED && !init_datetime_fromisoformat()) {
+        PyErr_Print();
+        abort();
+    } else {
+        DATETIME_FROMISOFORMAT_INITIALIZED = 1;
+    }
+
+    rv |= _run_fuzz(data, size, fuzz_datetime_fromisoformat);
 #endif
   return rv;
 }
