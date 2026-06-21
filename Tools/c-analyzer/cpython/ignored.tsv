@@ -652,6 +652,9 @@ Modules/_xxtestfuzz/fuzzer.c	-	zoneinfo_struct_error	-
 Modules/_xxtestfuzz/fuzzer.c	-	pycompile_scratch	-
 Modules/_xxtestfuzz/fuzzer.c	-	start_vals	-
 Modules/_xxtestfuzz/fuzzer.c	-	optimize_vals	-
+Modules/_xxtestfuzz/fuzzer.c	-	binascii_decoders	-
+Modules/_xxtestfuzz/fuzzer.c	-	binascii_error	-
+Modules/_xxtestfuzz/fuzzer.c	-	binascii_strict_mode_kw	-
 Modules/_xxtestfuzz/fuzzer.c	LLVMFuzzerTestOneInput	CSV_READER_INITIALIZED	-
 Modules/_xxtestfuzz/fuzzer.c	LLVMFuzzerTestOneInput	JSON_LOADS_INITIALIZED	-
 Modules/_xxtestfuzz/fuzzer.c	LLVMFuzzerTestOneInput	SRE_COMPILE_INITIALIZED	-
@@ -660,6 +663,7 @@ Modules/_xxtestfuzz/fuzzer.c	LLVMFuzzerTestOneInput	STRUCT_UNPACK_INITIALIZED	-
 Modules/_xxtestfuzz/fuzzer.c	LLVMFuzzerTestOneInput	AST_LITERAL_EVAL_INITIALIZED	-
 Modules/_xxtestfuzz/fuzzer.c	LLVMFuzzerTestOneInput	ELEMENTTREE_PARSEWHOLE_INITIALIZED	-
 Modules/_xxtestfuzz/fuzzer.c	LLVMFuzzerTestOneInput	ZONEINFO_INITIALIZED	-
+Modules/_xxtestfuzz/fuzzer.c	LLVMFuzzerTestOneInput	BINASCII_INITIALIZED	-
 
 ##-----------------------
 ## the analyzer should have ignored these

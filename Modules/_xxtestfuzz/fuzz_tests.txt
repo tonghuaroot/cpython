@@ -10,3 +10,4 @@ fuzz_ast_literal_eval
 fuzz_elementtree_parsewhole
 fuzz_pycompile
 fuzz_zoneinfo
+fuzz_binascii

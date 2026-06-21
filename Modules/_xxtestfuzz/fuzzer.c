@@ -651,6 +651,74 @@ static int fuzz_zoneinfo(const char* data, size_t size) {
     return 0;
 }
 
+#define MAX_BINASCII_TEST_SIZE 0x10000
+#define BINASCII_NUM_DECODERS 7
+/* a2b_base64, a2b_base32, a2b_base85, a2b_ascii85, a2b_hex, a2b_qp,
+   a2b_uu -- the untrusted-text decoders in the binascii C module. */
+PyObject* binascii_decoders[BINASCII_NUM_DECODERS] = {NULL};
+PyObject* binascii_error = NULL;
+PyObject* binascii_strict_mode_kw = NULL;
+/* Called by LLVMFuzzerTestOneInput for initialization */
+static int init_binascii(void) {
+    PyObject* module = PyImport_ImportModule("binascii");
+    if (module == NULL) {
+        return 0;
+    }
+    binascii_error = PyObject_GetAttrString(module, "Error");
+    if (binascii_error == NULL) {
+        Py_DECREF(module);
+        return 0;
+    }
+    const char* names[BINASCII_NUM_DECODERS] = {
+        "a2b_base64", "a2b_base32", "a2b_base85", "a2b_ascii85",
+        "a2b_hex", "a2b_qp", "a2b_uu"};
+    for (int i = 0; i < BINASCII_NUM_DECODERS; i++) {
+        binascii_decoders[i] = PyObject_GetAttrString(module, names[i]);
+        if (binascii_decoders[i] == NULL) {
+            Py_DECREF(module);
+            return 0;
+        }
+    }
+    Py_DECREF(module);
+    binascii_strict_mode_kw = Py_BuildValue("{s:O}", "strict_mode", Py_True);
+    return binascii_strict_mode_kw != NULL;
+}
+/* Fuzz the binascii.a2b_* decoders on untrusted input. */
+static int fuzz_binascii(const char* data, size_t size) {
+    if (size < 1 || size > MAX_BINASCII_TEST_SIZE) {
+        return 0;
+    }
+    /* First byte selects the decoder; the rest is the decoded input. */
+    int which = ((unsigned char) data[0]) % BINASCII_NUM_DECODERS;
+    PyObject* input = PyBytes_FromStringAndSize(data + 1, size - 1);
+    if (input == NULL) {
+        return 0;
+    }
+    PyObject* args = PyTuple_Pack(1, input);
+    Py_DECREF(input);
+    if (args == NULL) {
+        return 0;
+    }
+    PyObject* result = PyObject_Call(binascii_decoders[which], args, NULL);
+    Py_XDECREF(result);
+    /* a2b_base64 has a newer strict_mode=True path; exercise it too. */
+    if (which == 0) {
+        result = PyObject_Call(binascii_decoders[0], args,
+                               binascii_strict_mode_kw);
+        Py_XDECREF(result);
+    }
+    Py_DECREF(args);
+    if (PyErr_Occurred()) {
+        /* Malformed input raises binascii.Error or ValueError in
+           abundance; anything else is treated as a finding. */
+        if (PyErr_ExceptionMatches(binascii_error) ||
+            PyErr_ExceptionMatches(PyExc_ValueError)) {
+            PyErr_Clear();
+        }
+    }
+    return 0;
+}
+
 /* Run fuzzer and abort on failure. */
 static int _run_fuzz(const uint8_t *data, size_t size, int(*fuzzer)(const char* , size_t)) {
     int rv = fuzzer((const char*) data, size);
@@ -806,6 +874,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     }
 
     rv |= _run_fuzz(data, size, fuzz_zoneinfo);
+#endif
+#if !defined(_Py_FUZZ_ONE) || defined(_Py_FUZZ_fuzz_binascii)
+    static int BINASCII_INITIALIZED = 0;
+    if (!BINASCII_INITIALIZED && !init_binascii()) {
+        PyErr_Print();
+        abort();
+    } else {
+        BINASCII_INITIALIZED = 1;
+    }
+
+    rv |= _run_fuzz(data, size, fuzz_binascii);
 #endif
   return rv;
 }
