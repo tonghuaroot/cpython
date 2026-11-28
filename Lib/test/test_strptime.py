@@ -709,6 +709,17 @@ class StrptimeTests(unittest.TestCase):
 class Strptime12AMPMTests(unittest.TestCase):
     """Test a _strptime regression in '%I %p' at 12 noon (12 PM)"""
 
+    def test_empty_am_pm(self):
+        locale_time = _strptime.LocaleTime()
+        locale_time.am_pm = ('', '')
+        time_re = _strptime.TimeRE(locale_time)
+        with (
+            support.swap_attr(_strptime, '_TimeRE_cache', time_re),
+            support.swap_attr(_strptime, '_regex_cache', {}),
+        ):
+            self.assertEqual(time.strptime('01', '%I').tm_hour, 1)
+            self.assertEqual(time.strptime('12', '%I').tm_hour, 0)
+
     def test_twelve_noon_midnight(self):
         eq = self.assertEqual
         eq(time.strptime('12 PM', '%I %p')[3], 12)

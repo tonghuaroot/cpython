@@ -1,0 +1,2 @@
+Fix :func:`time.strptime` interpreting 12-hour times as PM in locales
+with empty AM and PM strings.
